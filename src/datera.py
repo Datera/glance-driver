@@ -631,6 +631,14 @@ class DateraDriver(object):
                 except Exception:
                     pass
 
+    def _raise_response(driver, response):
+        msg = _('Request to Datera cluster returned bad status:'
+                ' %(status)s | %(reason)s') % {
+                    'status': response.status_code,
+                    'reason': response.reason}
+        LOG.error(msg)
+        raise DateraAPIException(msg)
+
     def _handle_bad_status(self,
                            response,
                            connection_string,
