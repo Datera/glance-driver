@@ -517,7 +517,10 @@ class DateraDriver(object):
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         # Add data length and checksum to ai metadata
-        self.update_metadata(ai_name, {'checksum': md5hex, 'length': len_data})
+        self.update_metadata(ai_name,
+                             {'checksum': md5hex,
+                              'length': len_data,
+                              'type': 'image'})
         return len_data, md5hex
 
     def _get_sis_iqn_portal(self, ai_name):
