@@ -52,6 +52,21 @@ Volume Driver Cinder.conf Options
 Installation
 ------
 
+* Install the driver
+
+  Copy the contents of ``src`` into ``/usr/local/lib/python2.7/dist-packages/glance_store/_drivers/``
+
+* Update the StrCfg in backend.py
+  Modify the following in ``glance_store/backend.py``
+
+.. code-block:: python
+
+    cfg.StrOpt('default_store',
+               default='file',
+               choices=('file', 'filesystem', 'http', 'https', 'swift',
+                        'swift+http', 'swift+https', 'swift+config', 'rbd',
+                        'sheepdog', 'cinder', 'vsphere'),   # <-- add 'datera'
+
 * Modify entry_points.txt
 
   This file is located in the ".egg" directory for the installation of
