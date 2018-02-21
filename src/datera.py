@@ -361,7 +361,11 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '1.0.0'
+    VERSION = 'v1.0.1'
+    VERSION_HISTORY = """
+        v1.0.0 -- Initial driver
+        v1.0.1 -- Removing references to trace_id from driver
+    """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
 
@@ -379,7 +383,6 @@ class DateraDriver(object):
         self.use_ssl = ssl
         self.datera_api_token = None
         self.thread_local = threading.local()
-        self.thread_local.trace_id = None
         self.client_cert = client_cert
         self.client_cert_key = client_cert_key
         self.driver_prefix = str(uuid.uuid4())[:4]
@@ -747,7 +750,7 @@ class DateraDriver(object):
                       "Datera Request Method: %(method)s\n"
                       "Datera Request Payload: %(payload)s\n"
                       "Datera Request Headers: %(header)s\n",
-                      {'tid': self.thread_local.trace_id,
+                      {'tid': None,
                        'rid': request_id,
                        'api': api_version,
                        'url': resource_url,
@@ -773,7 +776,7 @@ class DateraDriver(object):
                       "Datera Response URL: %(url)s\n"
                       "Datera Response Payload: %(payload)s\n"
                       "Datera Response Object: %(obj)s\n",
-                      {'tid': self.thread_local.trace_id,
+                      {'tid': None,
                        'rid': request_id,
                        'delta': timedelta,
                        'url': response.url,
