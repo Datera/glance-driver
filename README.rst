@@ -20,9 +20,14 @@ Datera Glance Image Backend Driver
      - 1.0.0
      - Initial Driver
      - 2.1.X, 2.2.X
+   * - Master
+     - master
+     - 1.0.1
+     - Bugfix for trace_id AttributeError
+     - 2.1.X, 2.2.X, 3.X+
 
 -------
-Volume Driver Cinder.conf Options
+Volume Driver Glance-Api.conf Options
 -------
 
 .. list-table:: Description of Datera Glance backend driver configuration options
@@ -94,6 +99,10 @@ Installation
   - ``datera_san_ip``
   - ``datera_san_login``
   - ``datera_san_password``
+
+  If Datera is going to be used with a non ``/root`` tenant, then set
+  - ``datera_tenant_id``
+  Under ``[glance_store]`` as well
 
 * Setup rootwrap
 
