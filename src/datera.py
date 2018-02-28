@@ -83,7 +83,11 @@ _DATERA_OPTS = [
                default=units.Gi,
                help="Chunk size (in bytes) used for reading and writing to "
                     "backing volume.  Larger chunk sizes will use more memory,"
-                    " but will potentially write and read faster")]
+                    " but will potentially write and read faster"),
+    cfg.StrOpt('datera_glance_rootwrap_path',
+               default="sudo glance-rootwrap",
+               help="Custom path and environment variables for calling "
+                    "glance-rootwrap")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -141,7 +145,8 @@ def _authenticated(func):
 
 
 def _get_root_helper():
-    return 'sudo glance-rootwrap %s' % CONF.glance_store.rootwrap_config
+    return '%s %s' % (CONF.glance_store.datera_glance_rootwrap_path,
+                      CONF.glance_store.rootwrap_config)
 
 
 class DateraImage(object):
@@ -167,6 +172,9 @@ class DateraImage(object):
         """
         # Determine how large the volume should be to the nearest GB
         vol_size = int(math.ceil(float(image_size) / units.Gi))
+        # We can't provision less than a single GB volume
+        if vol_size < 1:
+            vol_size = 1
         # Create image backing volume
         ai = driver.create_ai(image_id, vol_size)
         location = "/" + URL_TEMPLATES['ai_inst']().format(ai['name'])
@@ -361,10 +369,12 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'v1.0.1'
+    VERSION = 'v1.0.2'
     VERSION_HISTORY = """
         v1.0.0 -- Initial driver
         v1.0.1 -- Removing references to trace_id from driver
+        v1.0.2 -- Added datera_glance_rootwrap_path StrOpt and fixed
+                  bug related to minimum volume size
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
