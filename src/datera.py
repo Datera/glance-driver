@@ -87,7 +87,11 @@ _DATERA_OPTS = [
     cfg.StrOpt('datera_glance_rootwrap_path',
                default="sudo glance-rootwrap",
                help="Custom path and environment variables for calling "
-                    "glance-rootwrap")]
+                    "glance-rootwrap"),
+    cfg.IntOpt('datera_default_image_size',
+               default=1,
+               help="This value determines what size an image should be if "
+                    "no size is provided")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -162,7 +166,6 @@ class DateraImage(object):
         self.location = location
         self.name = os.path.basename(self.location)
         self.driver = driver
-        self._data_size = None
         self._vol_size = None
 
     @classmethod
@@ -170,6 +173,11 @@ class DateraImage(object):
         """
         data_size must be in MiB
         """
+        # Use default size if we're not given one
+        if image_size == 0:
+            LOG.debug("Image size is 0, using default size of: %s",
+                      driver.default_size)
+            image_size = driver.default_size
         # Determine how large the volume should be to the nearest GB
         vol_size = int(math.ceil(float(image_size) / units.Gi))
         # We can't provision less than a single GB volume
@@ -188,18 +196,6 @@ class DateraImage(object):
         reader = self.driver.read_image_from_vol(_get_name(self.image_id))
         size = next(reader)
         return reader, size
-
-    @property
-    def data_size(self):
-        if self._data_size is None:
-            pass
-        return self._data_size
-
-    @property
-    def vol_size(self):
-        if self._vol_size is None:
-            self.driver.get_vol_size(self.location)
-        return self._vol_size
 
     def get_uri(self):
         return StoreLocation({'image': self.image_id,
@@ -265,7 +261,8 @@ class Store(glance_store.driver.Store):
                 self.conf.glance_store.datera_tenant_id,
                 self.conf.glance_store.datera_replica_count,
                 self.conf.glance_store.datera_placement_mode,
-                self.conf.glance_store.datera_chunk_size)
+                self.conf.glance_store.datera_chunk_size,
+                self.conf.glance_store.datera_default_image_size)
         except cfg.ConfigFileValueError as e:
             reason = _("Error in Datera store configuration: %s") % e
             raise exceptions.BadStoreConfiguration(
@@ -289,7 +286,8 @@ class Store(glance_store.driver.Store):
                         from glance_store.location.get_location_from_uri()
         :raises: `glance.exceptions.NotFound` if image does not exist
         """
-        LOG.debug("get() called with location: %s", location)
+        LOG.debug("get() called with location: %s, offset: %s, chunk_size: "
+                  "%s, context: %s", location, offset, chunk_size, context)
         try:
             image = self._image_from_location(location.store_location)
             return image.read()
@@ -308,7 +306,8 @@ class Store(glance_store.driver.Store):
                         from glance_store.location.get_location_from_uri()
         :raises: `glance_store.exceptions.NotFound` if image does not exist
         """
-        LOG.debug("get_size() called with location: %s", location)
+        LOG.debug("get_size() called with location: %s, context: %s",
+                  location, context)
         try:
             image = self._image_from_location(location.store_location)
             return image.data_size
@@ -335,7 +334,9 @@ class Store(glance_store.driver.Store):
         :raises: `glance_store.exceptions.Duplicate` if the image already
                 existed
         """
-        LOG.debug("add() called with image_id: %s", image_id)
+        LOG.debug("add() called with image_id: %s, image_file: %s, "
+                  "image_size %s, context: %s, verifier: %s",
+                  image_id, image_file, image_size, context, verifier)
         try:
             image, data_size, md5hex = DateraImage.create(
                 self.driver, image_id, image_file, image_size)
@@ -356,7 +357,8 @@ class Store(glance_store.driver.Store):
                   from glance_store.location.get_location_from_uri()
         :raises: `glance_store.exceptions.NotFound` if image does not exist
         """
-        LOG.debug("delete() called with location: %s", location)
+        LOG.debug("delete() called with location: %s, context: %s",
+                  location, context)
         try:
             image = self._image_from_location(location.store_location)
             self.driver.delete_ai(_get_name(image.image_id))
@@ -375,13 +377,14 @@ class DateraDriver(object):
         v1.0.1 -- Removing references to trace_id from driver
         v1.0.2 -- Added datera_glance_rootwrap_path StrOpt and fixed
                   bug related to minimum volume size
+        vIS.ALPHA  -- Default image size temp patch
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
 
     def __init__(self, san_ip, username, password, port, tenant, replica_count,
-                 placement_mode, chunk_size, ssl=True, client_cert=None,
-                 client_cert_key=None):
+                 placement_mode, chunk_size, default_image_size, ssl=True,
+                 client_cert=None, client_cert_key=None):
         self.san_ip = san_ip
         self.username = username
         self.password = password
@@ -399,6 +402,7 @@ class DateraDriver(object):
         self.do_profile = True
         self.retry_attempts = 5
         self.interval = 2
+        self.default_size = default_image_size
 
     def login(self):
         """Use the san_login and san_password to set token."""
@@ -644,6 +648,12 @@ class DateraDriver(object):
                 # Best effort disconnection
                 try:
                     connector.disconnect_volume(attach_info, attach_info)
+                except Exception:
+                    pass
+                # Best effort offline (cloning an offline AI is ~4 seconds
+                # faster than cloning an online AI)
+                try:
+                    self.detach_ai(ai_name)
                 except Exception:
                     pass
 
