@@ -91,11 +91,7 @@ _DATERA_OPTS = [
                     "glance-rootwrap"),
     cfg.StrOpt('datera_glance_rootwrap_config',
                default="/etc/glance/rootwrap.conf",
-               help="Custom path for rootwrap.conf file for glance-rootwrap"),
-    cfg.IntOpt('datera_default_image_size',
-               default=1,
-               help="This value determines what size an image should be if "
-                    "no size is provided")]
+               help="Custom path for rootwrap.conf file for glance-rootwrap")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -177,11 +173,6 @@ class DateraImage(object):
         """
         data_size must be in MiB
         """
-        # Use default size if we're not given one
-        if image_size == 0:
-            LOG.debug("Image size is 0, using default size of: %s",
-                      driver.default_size)
-            image_size = driver.default_size
         # Determine how large the volume should be to the nearest GB
         vol_size = int(math.ceil(float(image_size) / units.Gi))
         # We can't provision less than a single GB volume
@@ -265,8 +256,7 @@ class Store(glance_store.driver.Store):
                 self.conf.glance_store.datera_tenant_id,
                 self.conf.glance_store.datera_replica_count,
                 self.conf.glance_store.datera_placement_mode,
-                self.conf.glance_store.datera_chunk_size,
-                self.conf.glance_store.datera_default_image_size)
+                self.conf.glance_store.datera_chunk_size)
         except cfg.ConfigFileValueError as e:
             reason = _("Error in Datera store configuration: %s") % e
             raise exceptions.BadStoreConfiguration(
@@ -395,7 +385,7 @@ class DateraDriver(object):
     API_VERSION = "2.1"
 
     def __init__(self, san_ip, username, password, port, tenant, replica_count,
-                 placement_mode, chunk_size, default_image_size, ssl=True,
+                 placement_mode, chunk_size, ssl=True,
                  client_cert=None, client_cert_key=None):
         self.san_ip = san_ip
         self.username = username
@@ -414,7 +404,6 @@ class DateraDriver(object):
         self.do_profile = True
         self.retry_attempts = 5
         self.interval = 2
-        self.default_size = default_image_size
 
     def login(self):
         """Use the san_login and san_password to set token."""
