@@ -333,7 +333,8 @@ class Store(glance_store.driver.Store):
                   image_id, image_file, image_size, context, verifier)
         if image_size == 0:
             LOG.debug("image_size 0 found. Using image virtual_size")
-            qemu_info = self._execute("qemu-img info %s" % image_file.name)
+            qemu_info = self._execute("qemu-img info %s" % image_file.name,
+                                      root=False)
             info = imageutils.QemuImgInfo(cmd_output=qemu_info)
             image_size = info.virtual_size / units.Gi or 1
         try:
@@ -831,7 +832,7 @@ class DateraDriver(object):
             raise DateraAPIException(msg)
 
     @staticmethod
-    def _execute(cmd):
+    def _execute(cmd, root=True):
         parts = shlex.split(cmd)
         putils.execute(*parts, root_helper=_get_root_helper(),
-                       run_as_root=True)
+                       run_as_root=root)
