@@ -88,6 +88,9 @@ _DATERA_OPTS = [
                default="sudo glance-rootwrap",
                help="Custom path and environment variables for calling "
                     "glance-rootwrap"),
+    cfg.StrOpt('datera_glance_rootwrap_config',
+               default="/etc/glance/rootwrap.conf",
+               help="Custom path for rootwrap.conf file for glance-rootwrap"),
     cfg.IntOpt('datera_default_image_size',
                default=1,
                help="This value determines what size an image should be if "
@@ -150,7 +153,7 @@ def _authenticated(func):
 
 def _get_root_helper():
     return '%s %s' % (CONF.glance_store.datera_glance_rootwrap_path,
-                      CONF.glance_store.rootwrap_config)
+                      CONF.glance_store.datera_glance_rootwrap_config)
 
 
 class DateraImage(object):
@@ -371,13 +374,15 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'v1.0.2'
+    VERSION = 'vIS.ALPHA.2'
     VERSION_HISTORY = """
         v1.0.0 -- Initial driver
         v1.0.1 -- Removing references to trace_id from driver
         v1.0.2 -- Added datera_glance_rootwrap_path StrOpt and fixed
                   bug related to minimum volume size
         vIS.ALPHA  -- Default image size temp patch
+        vIS.ALPHA.2 -- Changed rootwrap_config to datera_glance_rootwrap_config
+                       and added StrOpt.
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
