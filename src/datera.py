@@ -46,6 +46,7 @@ from glance_store import exceptions
 from glance_store.common import utils
 
 from os_brick.initiator import connector as os_conn
+from os_brick.initiator import linuxscsi
 from os_brick import exception as brick_exception
 
 
@@ -93,8 +94,8 @@ _DATERA_OPTS = [
                help="Custom path for rootwrap.conf file for glance-rootwrap"),
     cfg.IntOpt('datera_default_image_size',
                default=1,
-               help="This value determines what size an image should be if "
-                    "no size is provided")]
+               help="(GB) This determines the starting image size if no size "
+                    "is provided for an image on creation")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -177,10 +178,13 @@ class DateraImage(object):
         data_size must be in MiB
         """
         # Use default size if we're not given one
+        incremental = False
         if image_size == 0:
-            LOG.debug("Image size is 0, using default size of: %s",
-                      driver.default_size)
-            image_size = driver.default_size
+            LOG.debug(_("Image size is 0, using default size of: %s, then "
+                        "performing resize and extend for data in excess of "
+                        "%s" % (driver.default_size, driver.default_size)))
+            image_size = driver.default_size * units.Gi
+            incremental = True
         # Determine how large the volume should be to the nearest GB
         vol_size = int(math.ceil(float(image_size) / units.Gi))
         # We can't provision less than a single GB volume
@@ -192,7 +196,7 @@ class DateraImage(object):
         image = cls(image_id, driver.san_ip, driver.san_port, location, driver)
         # Copy image data to volume
         data_size, md5hex = driver.copy_image_to_vol(
-            _get_name(image_id), image_file)
+            _get_name(image_id), image_file, incremental)
         return image, data_size, md5hex
 
     def read(self):
@@ -224,7 +228,7 @@ class StoreLocation(glance_store.location.StoreLocation):
                                                _get_name(self.image_id))
 
     def parse_uri(self, uri):
-        LOG.debug("Parsing uri: %s", uri)
+        LOG.debug(_("Parsing uri: %s" % uri))
         r = URI_RE.match(uri)
         self.image_id = r.group('image_id')
         self.host = r.group('hostname')
@@ -289,8 +293,9 @@ class Store(glance_store.driver.Store):
                         from glance_store.location.get_location_from_uri()
         :raises: `glance.exceptions.NotFound` if image does not exist
         """
-        LOG.debug("get() called with location: %s, offset: %s, chunk_size: "
-                  "%s, context: %s", location, offset, chunk_size, context)
+        LOG.debug(_("get() called with location: %s, offset: %s, chunk_size: "
+                    "%s, context: %s" %
+                    (location, offset, chunk_size, context)))
         try:
             image = self._image_from_location(location.store_location)
             return image.read()
@@ -309,8 +314,8 @@ class Store(glance_store.driver.Store):
                         from glance_store.location.get_location_from_uri()
         :raises: `glance_store.exceptions.NotFound` if image does not exist
         """
-        LOG.debug("get_size() called with location: %s, context: %s",
-                  location, context)
+        LOG.debug(_("get_size() called with location: %s, context: %s" %
+                    (location, context)))
         try:
             image = self._image_from_location(location.store_location)
             return image.data_size
@@ -337,9 +342,9 @@ class Store(glance_store.driver.Store):
         :raises: `glance_store.exceptions.Duplicate` if the image already
                 existed
         """
-        LOG.debug("add() called with image_id: %s, image_file: %s, "
-                  "image_size %s, context: %s, verifier: %s",
-                  image_id, image_file, image_size, context, verifier)
+        LOG.debug(_("add() called with image_id: %s, image_file: %s, "
+                    "image_size %s, context: %s, verifier: %s" %
+                    (image_id, image_file, image_size, context, verifier)))
         try:
             image, data_size, md5hex = DateraImage.create(
                 self.driver, image_id, image_file, image_size)
@@ -374,7 +379,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'vIS.ALPHA.2'
+    VERSION = 'vIS.ALPHA.4'
     VERSION_HISTORY = """
         v1.0.0 -- Initial driver
         v1.0.1 -- Removing references to trace_id from driver
@@ -383,6 +388,7 @@ class DateraDriver(object):
         vIS.ALPHA  -- Default image size temp patch
         vIS.ALPHA.2 -- Changed rootwrap_config to datera_glance_rootwrap_config
                        and added StrOpt.
+        vIS.ALPHA.4 -- Added slow-code-path for uploading 0 sized images
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
@@ -491,8 +497,16 @@ class DateraDriver(object):
             raise
 
     def get_vol_size(self, ai_name):
-        url = os.path.join(ai_name, STORAGE_NAME, VOLUME_NAME)
+        url = os.path.join(
+            "app_instances", ai_name, "storage_instances", STORAGE_NAME,
+            "volumes", VOLUME_NAME)
         return self._issue_api_request(url)['data']['size']
+
+    def extend_vol(self, ai_name, size):
+        url = os.path.join(
+            "app_instances", ai_name, "storage_instances", STORAGE_NAME,
+            "volumes", VOLUME_NAME)
+        return self._issue_api_request(url, method='put', body={'size': size})
 
     def read_image_from_vol(self, ai_name):
         # read metadata
@@ -521,21 +535,38 @@ class DateraDriver(object):
                         yield data
             self._execute("chmod o-r {}".format(device))
 
-    def copy_image_to_vol(self, ai_name, image_file):
+    def copy_image_to_vol(self, ai_name, image_file, incremental):
         md5 = hashlib.md5()
-        len_data = 0
+        len_data = 0  # bytes
         with self._connect_target(ai_name) as device:
             self._execute("chmod o+w {}".format(device))
             chunks = utils.chunkreadable(image_file, self.chunk_size)
             with io.open(device, 'wb') as outfile:
-                for data in chunks:
-                    # Write image data
-                    # Write number, length and MD5 to initial offset
-                    len_data += len(data)
-                    md5.update(data)
-                    outfile.write(data)
-                    LOG.debug(_("Writing Data.\n"
-                                "Length: %s" % len(data)))
+                if incremental:
+                    lxscsi = linuxscsi.LinuxSCSI(_get_root_helper())
+                    vsize = self.get_vol_size(ai_name)  # GB
+                    for data in chunks:
+                        len_data += len(data)
+                        if len_data >= vsize * units.Gi:  # bytes comparison
+                            LOG.debug(_("Reached end of volume, extending %s "
+                                        "GB" % (self.chunk_size / units.Gi)))
+                            self.extend_vol(  # GB
+                                ai_name, vsize + (self.chunk_size / units.Gi))
+                            # Force the SCSI bus to scan for extended volume
+                            lxscsi.extend_volume([device])
+                        md5.update(data)
+                        outfile.write(data)
+                        LOG.debug(_("Writing Data.\n"
+                                    "Length: %s" % len(data)))
+                else:
+                    for data in chunks:
+                        # Write image data
+                        # Write number, length and MD5 to initial offset
+                        len_data += len(data)
+                        md5.update(data)
+                        outfile.write(data)
+                        LOG.debug(_("Writing Data.\n"
+                                    "Length: %s" % len(data)))
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         # Add data length and checksum to ai metadata
@@ -580,7 +611,8 @@ class DateraDriver(object):
             existing_acl = self._issue_api_request(acl_url, method="get")[
                 'data']
             data = {}
-            data['initiators'] = existing_acl['initiators']
+            data['initiators'] = [
+                {'path': elem['path']} for elem in existing_acl['initiators']]
             data['initiators'].append({"path": initiator_path})
             data['initiator_groups'] = existing_acl['initiator_groups']
             self._issue_api_request(acl_url, method="put", body=data)
