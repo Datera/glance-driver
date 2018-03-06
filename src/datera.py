@@ -38,7 +38,6 @@ from oslo_concurrency import processutils as putils
 from oslo_config import cfg
 from oslo_utils import excutils
 from oslo_utils import units
-from oslo_utils import imageutils
 
 import glance_store
 from glance_store.i18n import _
@@ -341,11 +340,6 @@ class Store(glance_store.driver.Store):
         LOG.debug("add() called with image_id: %s, image_file: %s, "
                   "image_size %s, context: %s, verifier: %s",
                   image_id, image_file, image_size, context, verifier)
-        if image_size == 0:
-            LOG.debug("image_size 0 found. Using image virtual_size")
-            qemu_info = self._execute("qemu-img info %s" % image_file.name)
-            info = imageutils.QemuImgInfo(cmd_output=qemu_info)
-            image_size = info.virtual_size / units.Gi or 1
         try:
             image, data_size, md5hex = DateraImage.create(
                 self.driver, image_id, image_file, image_size)
@@ -380,7 +374,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'vIS.ALPHA.3'
+    VERSION = 'vIS.ALPHA.2'
     VERSION_HISTORY = """
         v1.0.0 -- Initial driver
         v1.0.1 -- Removing references to trace_id from driver
@@ -389,7 +383,6 @@ class DateraDriver(object):
         vIS.ALPHA  -- Default image size temp patch
         vIS.ALPHA.2 -- Changed rootwrap_config to datera_glance_rootwrap_config
                        and added StrOpt.
-        vIS.ALPHA.3  -- Using qemu-img info to determine virtual size
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
