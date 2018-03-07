@@ -46,7 +46,6 @@ from glance_store import exceptions
 from glance_store.common import utils
 
 from os_brick.initiator import connector as os_conn
-from os_brick.initiator import linuxscsi
 from os_brick import exception as brick_exception
 
 
@@ -94,7 +93,7 @@ _DATERA_OPTS = [
                help="Custom path for rootwrap.conf file for glance-rootwrap"),
     cfg.IntOpt('datera_default_image_size',
                default=1,
-               help="(GB) This determines the starting image size if no size "
+               help="(GiB) This determines the starting image size if no size "
                     "is provided for an image on creation")]
 
 STORAGE_NAME = 'storage-1'
@@ -185,9 +184,9 @@ class DateraImage(object):
                         "%s" % (driver.default_size, driver.default_size)))
             image_size = driver.default_size * units.Gi
             incremental = True
-        # Determine how large the volume should be to the nearest GB
+        # Determine how large the volume should be to the nearest GiB
         vol_size = int(math.ceil(float(image_size) / units.Gi))
-        # We can't provision less than a single GB volume
+        # We can't provision less than a single GiB volume
         if vol_size < 1:
             vol_size = 1
         # Create image backing volume
@@ -379,7 +378,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'vIS.ALPHA.4'
+    VERSION = 'vIS.ALPHA.5'
     VERSION_HISTORY = """
         v1.0.0 -- Initial driver
         v1.0.1 -- Removing references to trace_id from driver
@@ -389,6 +388,8 @@ class DateraDriver(object):
         vIS.ALPHA.2 -- Changed rootwrap_config to datera_glance_rootwrap_config
                        and added StrOpt.
         vIS.ALPHA.4 -- Added slow-code-path for uploading 0 sized images
+        vIS.ALPHA.5 -- Rewrite of copy_image_to_vol to fix issues with copying
+                       images to volumes :P
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
@@ -508,10 +509,22 @@ class DateraDriver(object):
             "volumes", VOLUME_NAME)
         return self._issue_api_request(url, method='put', body={'size': size})
 
+    def rescan_device(self, device, size):
+        """ Size must be in bytes """
+        # Rescan ISCSI devices
+        self._execute("iscsiadm -m session -R")
+        result, _ = self._execute("blockdev --getsize64 %s" % device)
+        new_size = int(result.strip())
+        if new_size != size:
+            raise EnvironmentError(_(
+                "New blockdevice size does not match requested size, "
+                "[%s != %s]" % size, new_size))
+
     def read_image_from_vol(self, ai_name):
         # read metadata
         metadata = self.get_metadata(ai_name)
         len_data = int(metadata['length'])
+        rlen_data = 0
         md5hex = metadata['checksum']
         check = hashlib.md5()
         yield len_data
@@ -523,13 +536,19 @@ class DateraDriver(object):
                     data = None
                     if cur_data < self.chunk_size:
                         data = infile.read(cur_data)
+                        rlen_data += len(data)
                         # Verify data integrity
                         check.update(data)
+                        LOG.debug(_("Length Data. Metadata %s, Read %s" % (
+                                  len_data, rlen_data)))
+                        LOG.debug(_("MD5. Metadata %s, Read %s" % (
+                                 md5hex, check.hexdigest())))
                         assert check.hexdigest() == md5hex
                         yield data
                         break
                     else:
                         data = infile.read(self.chunk_size)
+                        rlen_data += len(data)
                         cur_data -= self.chunk_size
                         check.update(data)
                         yield data
@@ -537,56 +556,48 @@ class DateraDriver(object):
 
     def copy_image_to_vol(self, ai_name, image_file, incremental):
         md5 = hashlib.md5()
-        len_data = 0  # bytes
+        data_written = 0
         with self._connect_target(ai_name) as device:
             self._execute("chmod o+w {}".format(device))
             chunks = utils.chunkreadable(image_file, self.chunk_size)
-            with io.open(device, 'wb') as outfile:
-                if incremental:
-                    lxscsi = linuxscsi.LinuxSCSI(_get_root_helper())
-                    vsize = self.get_vol_size(ai_name)  # GB
-                    for data in chunks:
-                        len_data += len(data)
-                        if len_data > vsize * units.Gi:  # bytes comparison
-                            LOG.debug(_("Reached end of volume, extending %s "
-                                        "GB" % (self.chunk_size / units.Gi)))
-                            self.extend_vol(  # GB
-                                ai_name, vsize + (self.chunk_size / units.Gi))
-                            # Force the SCSI bus to scan for extended volume
-                            poll = 10
-                            while poll:
-                                try:
-                                    lxscsi.extend_volume([device])
-                                    break
-                                except putils.ProcessExecutionError as e:
-                                    LOG.debug(_(
-                                        "Error check for volume extension:"
-                                        " %s" % e))
-                                    poll -= 1
-                                    if not poll:
-                                        raise EnvironmentError(_(
-                                            "Reached the end of polling period"
-                                            " without success: %s" % e))
-                                    time.sleep(1)
-                        md5.update(data)
+            if incremental:
+                vsize = self.get_vol_size(ai_name)  # In GiB
+                for data in chunks:
+                    len_data = len(data)
+                    # bytes comparison
+                    if len_data + data_written > vsize * units.Gi:
+                        LOG.debug(_(
+                            "Data %s exceeds volume size of %s extending "
+                            "%s bytes" % (len_data + data_written,
+                                          vsize * units.Gi,
+                                          self.chunk_size)))
+                        # In GiB
+                        vsize += (self.chunk_size / units.Gi)
+                        self.extend_vol(ai_name, vsize)
+                        # Force the SCSI bus to scan for extended volume
+                        self.rescan_device(device, vsize * units.Gi)
+                    md5.update(data)
+                    with io.open(device, 'wb') as outfile:
+                        outfile.seek(data_written)
                         outfile.write(data)
-                        LOG.debug(_("Writing Data.\n"
-                                    "Length: %s" % len(data)))
-                else:
+                    data_written += len_data
+                    LOG.debug(_("Writing Data. Length: %s" % len(data)))
+                    self._execute("sync")
+            else:
+                with io.open(device, 'wb') as outfile:
                     for data in chunks:
                         # Write image data
-                        # Write number, length and MD5 to initial offset
-                        len_data += len(data)
+                        data_written += len(data)
                         md5.update(data)
                         outfile.write(data)
-                        LOG.debug(_("Writing Data.\n"
-                                    "Length: %s" % len(data)))
+                        LOG.debug(_("Writing Data. Length: %s, Offset: %s" %
+                                  (len(data), outfile.tell())))
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         # Add data length and checksum to ai metadata
         self.update_metadata(ai_name,
                              {'checksum': md5hex,
-                              'length': len_data,
+                              'length': data_written,
                               'type': 'image'})
         return len_data, md5hex
 
@@ -883,5 +894,6 @@ class DateraDriver(object):
     @staticmethod
     def _execute(cmd):
         parts = shlex.split(cmd)
-        putils.execute(*parts, root_helper=_get_root_helper(),
-                       run_as_root=True)
+        stdout, stderr = putils.execute(*parts, root_helper=_get_root_helper(),
+                                        run_as_root=True)
+        return stdout, stderr
