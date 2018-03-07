@@ -547,13 +547,17 @@ class DateraDriver(object):
                     vsize = self.get_vol_size(ai_name)  # GB
                     for data in chunks:
                         len_data += len(data)
-                        if len_data >= vsize * units.Gi:  # bytes comparison
+                        if len_data > vsize * units.Gi:  # bytes comparison
                             LOG.debug(_("Reached end of volume, extending %s "
                                         "GB" % (self.chunk_size / units.Gi)))
                             self.extend_vol(  # GB
                                 ai_name, vsize + (self.chunk_size / units.Gi))
                             # Force the SCSI bus to scan for extended volume
-                            lxscsi.extend_volume([device])
+                            try:
+                                lxscsi.extend_volume([device])
+                            except putils.ProcessExecutionError as e:
+                                LOG.debug(_("Error check for volume extension:"
+                                            " %s" % e))
                         md5.update(data)
                         outfile.write(data)
                         LOG.debug(_("Writing Data.\n"

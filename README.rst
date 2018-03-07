@@ -50,7 +50,7 @@ Volume Driver Glance-Api.conf Options
      - (String) Number of replicas for created volumes
    * - ``datera_placement_mode`` = ``hybrid``
      - (String) 'single_flash' for single-flash-replica placement, 'all_flash' for all-flash-replica placement, 'hybrid' for hybrid placement
-   * - ``datera_chunk_size`` = 1 GB
+   * - ``datera_chunk_size`` = ``1073741824``
      - (Int) Chunk size (in bytes) used for reading and writing to backing volumes.  Larger chunk sized will use more memory, but will potentially write and read faster
 
 ------
