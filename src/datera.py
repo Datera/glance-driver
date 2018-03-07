@@ -553,11 +553,21 @@ class DateraDriver(object):
                             self.extend_vol(  # GB
                                 ai_name, vsize + (self.chunk_size / units.Gi))
                             # Force the SCSI bus to scan for extended volume
-                            try:
-                                lxscsi.extend_volume([device])
-                            except putils.ProcessExecutionError as e:
-                                LOG.debug(_("Error check for volume extension:"
-                                            " %s" % e))
+                            poll = 10
+                            while poll:
+                                try:
+                                    lxscsi.extend_volume([device])
+                                    break
+                                except putils.ProcessExecutionError as e:
+                                    LOG.debug(_(
+                                        "Error check for volume extension:"
+                                        " %s" % e))
+                                    poll -= 1
+                                    if not poll:
+                                        raise EnvironmentError(_(
+                                            "Reached the end of polling period"
+                                            " without success: %s" % e))
+                                    time.sleep(1)
                         md5.update(data)
                         outfile.write(data)
                         LOG.debug(_("Writing Data.\n"
