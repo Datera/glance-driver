@@ -117,7 +117,6 @@ URL_TEMPLATES = {
     'at': lambda: 'app_templates/{}'}
 
 DEFAULT_SI_SLEEP = 1
-INITIATOR_GROUP_PREFIX = "IG-"
 
 
 class DateraAPIException(exceptions.GlanceStoreException):
@@ -373,19 +372,22 @@ class Store(glance_store.driver.Store):
             # Logging exceptions here because Glance has a tendancy to
             # suppress them
             LOG.error(e, exc_info=1)
-            raise
+            # We won't raise the exception after logging because we want
+            # image deletion to fail gracefully.  We'll see why it failed
+            # in the logs and not expose it to the user
 
 
 class DateraDriver(object):
 
-    VERSION = 'v1.0.5'
+    VERSION = 'v1.0.6'
     VERSION_HISTORY = """
-        v1.0.0 -- Initial driver
-        v1.0.1 -- Removing references to trace_id from driver
-        v1.0.2 -- Added datera_glance_rootwrap_path StrOpt and fixed
-                  bug related to minimum volume size
-        v1.0.5 -- Rewrite of copy_image_to_vol to fix issues with copying
-                  images to volumes
+        1.0.0 -- Initial driver
+        1.0.1 -- Removing references to trace_id from driver
+        1.0.2 -- Added datera_glance_rootwrap_path StrOpt and fixed
+                 bug related to minimum volume size
+        1.0.5 -- Rewrite of copy_image_to_vol to fix issues with copying
+                 images to volumes
+        1.0.6 -- Fixed deletion to fail gracefully. Removed unused constant.
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
