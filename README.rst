@@ -11,20 +11,40 @@ Datera Glance Image Backend Driver
    :class: config-ref-table
 
    * - OpenStack Release
-     - Driver Branch Name
+     - Driver Tag/Branch Name
      - Driver Version
      - Capabilities Introduced
      - Supported Datera Product Versions
    * - Master
-     - master
-     - 1.0.0
-     - Initial Driver
-     - 2.1.X, 2.2.X
+     - v2018.4.19.0
+     - 2018.4.19.0
+     - Switched to date-based versioning scheme
+     - 2.2.X, 3.X+
    * - Master
-     - master
+     - v1.0.6
+     - 1.0.6
+     - Fixed deletion to fail gracefully.  Removed unused constant
+     - 2.1.X, 2.2.X, 3.X+
+   * - Master
+     - v1.0.5
+     - 1.0.5
+     - Rewrite of copy_image_to_vol to fix issues with copying images to volumes
+     - 2.1.X, 2.2.X, 3.X+
+   * - Master
+     - v1.0.2
+     - 1.0.2
+     - Added datera_glance_rootwrap_path StrOpt and fixed bug related to minimum volume size
+     - 2.1.X, 2.2.X, 3.X+
+   * - Master
+     - v1.0.1
      - 1.0.1
      - Bugfix for trace_id AttributeError
      - 2.1.X, 2.2.X, 3.X+
+   * - Master
+     - v1.0.0
+     - 1.0.0
+     - Initial Driver
+     - 2.1.X, 2.2.X
 
 -------
 Volume Driver Glance-Api.conf Options

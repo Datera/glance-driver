@@ -379,7 +379,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = 'v1.0.6'
+    VERSION = '2018.4.19.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -388,6 +388,7 @@ class DateraDriver(object):
         1.0.5 -- Rewrite of copy_image_to_vol to fix issues with copying
                  images to volumes
         1.0.6 -- Fixed deletion to fail gracefully. Removed unused constant.
+        2018.4.19.0 -- Switched to date-based versioning scheme
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
     API_VERSION = "2.1"
