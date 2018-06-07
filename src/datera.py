@@ -598,7 +598,7 @@ class DateraDriver(object):
                              {'checksum': md5hex,
                               'length': data_written,
                               'type': 'image'})
-        return len_data, md5hex
+        return data_written, md5hex
 
     def _get_sis_iqn_portal(self, ai_name):
         iqn = None
