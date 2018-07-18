@@ -16,6 +16,11 @@ Datera Glance Image Backend Driver
      - Capabilities Introduced
      - Supported Datera Product Versions
    * - Master
+     - v2018.7.18.0
+     - 2018.7.18.0
+     - Ported driver to Datera Python-SDK, changed initiators to be created within a tenant rather than inherited from the root tenant.  Changed naming convention to OS-IMAGE-<image-id>
+     - 2.2.X, 3.X+
+   * - Master
      - v2018.4.19.0
      - 2018.4.19.0
      - Switched to date-based versioning scheme
@@ -80,6 +85,10 @@ Installation
 * Install the driver
 
   Copy the contents of ``src`` into ``/usr/local/lib/python2.7/dist-packages/glance_store/_drivers/``
+
+* Install the Datera Python-SDK
+
+  ``sudo pip install -e git+http://github.com/Datera/python-sdk``
 
 * Update the StrCfg in backend.py
   Modify the following in ``glance_store/backend.py``

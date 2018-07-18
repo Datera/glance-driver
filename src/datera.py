@@ -16,27 +16,22 @@
 """Storage backend for Datera EDF storage system"""
 
 import contextlib
-import functools
 import hashlib
 import io
-import json
 import logging
 import math
 import os
 import re
 import shlex
-import time
 import uuid
 
 import eventlet
 from eventlet.green import threading
-import requests
-import six
-from six.moves import http_client
+
+import dfs_sdk
 
 from oslo_concurrency import processutils as putils
 from oslo_config import cfg
-from oslo_utils import excutils
 from oslo_utils import units
 
 import glance_store
@@ -99,55 +94,16 @@ _DATERA_OPTS = [
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
 OS_PREFIX = "OS-"
+OS_POST_PREFIX = "IMAGE-"
 URI_RE = re.compile(
     r"datera://(?P<hostname>.*?):(?P<port>\d+?)(?P<location>/app_instances/"
-    r"{}(?P<image_id>.*$))".format(OS_PREFIX))
-URL_TEMPLATES = {
-    'ai': lambda: 'app_instances',
-    'ai_inst': lambda: (URL_TEMPLATES['ai']() + '/{}'),
-    'si': lambda: (URL_TEMPLATES['ai_inst']() + '/storage_instances'),
-    'si_inst': lambda storage_name: (
-        (URL_TEMPLATES['si']() + '/{}').format(
-            '{}', storage_name)),
-    'vol': lambda storage_name: (
-        (URL_TEMPLATES['si_inst'](storage_name) + '/volumes')),
-    'vol_inst': lambda storage_name, volume_name: (
-        (URL_TEMPLATES['vol'](storage_name) + '/{}').format(
-            '{}', volume_name)),
-    'at': lambda: 'app_templates/{}'}
-
+    r"({})?({})?(?P<image_id>.*$))".format(OS_PREFIX, OS_POST_PREFIX))
 DEFAULT_SI_SLEEP = 1
-
-
-class DateraAPIException(exceptions.GlanceStoreException):
-    message = _("Error during communication with the Datera EDF backend")
+API_VERSIONS = ["2.1", "2.2"]
 
 
 def _get_name(name):
-    return "".join((OS_PREFIX, name))
-
-
-def _authenticated(func):
-    """Ensure the driver is authenticated to make a request.
-
-    In do_setup() we fetch an auth token and store it. If that expires when
-    we do API request, we'll fetch a new one.
-    """
-    @functools.wraps(func)
-    def func_wrapper(driver, *args, **kwargs):
-        try:
-            return func(driver, *args, **kwargs)
-        except exceptions.NotAuthenticated:
-            # Prevent recursion loop. After the driver arg is the
-            # resource_type arg from _issue_api_request(). If attempt to
-            # login failed, we should just give up.
-            if args[0] == 'login':
-                raise
-
-            # Token might've expired, get a new one, try again.
-            driver.login()
-            return func(driver, *args, **kwargs)
-    return func_wrapper
+    return "".join((OS_PREFIX, OS_POST_PREFIX, name))
 
 
 def _get_root_helper():
@@ -190,15 +146,15 @@ class DateraImage(object):
             vol_size = 1
         # Create image backing volume
         ai = driver.create_ai(image_id, vol_size)
-        location = "/" + URL_TEMPLATES['ai_inst']().format(ai['name'])
+        location = '/'.join(ai['path'].split('/')[:-1] + [image_id])
         image = cls(image_id, driver.san_ip, driver.san_port, location, driver)
         # Copy image data to volume
         data_size, md5hex = driver.copy_image_to_vol(
-            _get_name(image_id), image_file, incremental)
+            image_id, image_file, incremental)
         return image, data_size, md5hex
 
     def read(self):
-        reader = self.driver.read_image_from_vol(_get_name(self.image_id))
+        reader = self.driver.read_image_from_vol(self.image_id)
         size = next(reader)
         return reader, size
 
@@ -367,7 +323,7 @@ class Store(glance_store.driver.Store):
                   location, context)
         try:
             image = self._image_from_location(location.store_location)
-            self.driver.delete_ai(_get_name(image.image_id))
+            self.driver.delete_ai(image.image_id)
         except Exception as e:
             # Logging exceptions here because Glance has a tendancy to
             # suppress them
@@ -379,7 +335,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2018.4.19.0'
+    VERSION = '2018.7.18.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -389,9 +345,12 @@ class DateraDriver(object):
                  images to volumes
         1.0.6 -- Fixed deletion to fail gracefully. Removed unused constant.
         2018.4.19.0 -- Switched to date-based versioning scheme
+        2018.7.18.0 -- Ported driver to Datera Python-SDK, changed initiators
+                       to be created within a tenant rather than inherited
+                       from the root tenant.  Changed naming convention to
+                       OS-IMAGE-<image-id>
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
-    API_VERSION = "2.1"
 
     def __init__(self, san_ip, username, password, port, tenant, replica_count,
                  placement_mode, chunk_size, default_image_size, ssl=True,
@@ -409,42 +368,29 @@ class DateraDriver(object):
         self.thread_local = threading.local()
         self.client_cert = client_cert
         self.client_cert_key = client_cert_key
-        self.driver_prefix = str(uuid.uuid4())[:4]
         self.do_profile = True
         self.retry_attempts = 5
         self.interval = 2
         self.default_size = default_image_size
 
-    def login(self):
-        """Use the san_login and san_password to set token."""
-        body = {
-            'name': self.username,
-            'password': self.password
-        }
+        if not all((self.san_ip, self.username, self.password)):
+            raise exceptions.MissingCredentialError(required=[
+                'datera_san_ip', 'datera_san_login', 'datera_san_password'])
 
-        # Unset token now, otherwise potential expired token will be sent
-        # along to be used for authorization when trying to login.
-        self.datera_api_token = None
-
-        try:
-            LOG.debug('Getting Datera auth token.')
-            results = self._issue_api_request(
-                'login', 'put', body=body, sensitive=True)
-            self.datera_api_token = results['key']
-        except exceptions.NotAuthenticated:
-            with excutils.save_and_reraise_exception():
-                LOG.error('Logging into the Datera cluster failed. Please '
-                          'check your username and password set in the '
-                          'cinder.conf and start the cinder-volume '
-                          'service again.')
-
-    def get_metadata(self, ai_name):
-        url = URL_TEMPLATES['ai_inst']().format(ai_name) + "/metadata"
-        return self._issue_api_request(url)['data']
-
-    def update_metadata(self, ai_name, keys):
-        url = URL_TEMPLATES['ai_inst']().format(ai_name) + "/metadata"
-        self._issue_api_request(url, method='put', body=keys)
+        for apiv in reversed(API_VERSIONS):
+            api = dfs_sdk.get_api(self.san_ip,
+                                  self.username,
+                                  self.password,
+                                  'v{}'.format(apiv),
+                                  disable_log=True)
+            try:
+                system = api.system.get()
+                LOG.debug('Connected successfully to cluster: %s', system.name)
+                self.api = api
+                self.apiv = apiv
+                break
+            except Exception as e:
+                LOG.warning(e)
 
     def create_ai(self, uid, size):
         app_params = (
@@ -469,44 +415,42 @@ class DateraDriver(object):
                     }
                 ]
             })
-        url = URL_TEMPLATES['ai']()
-        ai = self._issue_api_request(
-            url, method='post', body=app_params)['data']
+        tenant = self._create_tenant()
+        ai = self.api.app_instances.create(tenant=tenant, **app_params)
         return ai
 
     def detach_ai(self, ai_name):
-        url = URL_TEMPLATES['ai_inst']().format(ai_name)
+        tenant = self._create_tenant()
+        ai = self._name_to_ai(ai_name)
         data = {
             'admin_state': 'offline',
             'force': True
         }
         try:
-            self._issue_api_request(url, method='put', body=data)
-        except exceptions.NotFound:
+            ai.set(tenant=tenant, **data)
+        except dfs_sdk.exceptions.ApiNotFoundError:
             msg = _("Tried to detach volume %s, but it was not found in the "
                     "Datera cluster. Continuing with detach.")
             LOG.info(msg, ai_name)
 
     def delete_ai(self, ai_name):
         self.detach_ai(ai_name)
+        tenant = self._create_tenant()
+        ai = self._name_to_ai(ai_name)
         try:
-            self._issue_api_request(
-                URL_TEMPLATES['ai_inst']().format(ai_name), 'delete')
-        except (DateraAPIException, exceptions.NotFound):
+            ai.delete(tenant=tenant)
+        except dfs_sdk.exceptions.ApiNotFoundError:
             LOG.error(_("Couldn't find volume: %s"), ai_name)
             raise
 
     def get_vol_size(self, ai_name):
-        url = os.path.join(
-            "app_instances", ai_name, "storage_instances", STORAGE_NAME,
-            "volumes", VOLUME_NAME)
-        return self._issue_api_request(url)['data']['size']
+        vol = self._name_to_vol(ai_name)
+        return vol.size
 
     def extend_vol(self, ai_name, size):
-        url = os.path.join(
-            "app_instances", ai_name, "storage_instances", STORAGE_NAME,
-            "volumes", VOLUME_NAME)
-        return self._issue_api_request(url, method='put', body={'size': size})
+        vol = self._name_to_vol(ai_name)
+        tenant = self._get_tenant()
+        return vol.set(size=size, tenant=tenant)
 
     def rescan_device(self, device, size):
         """ Size must be in bytes """
@@ -521,7 +465,9 @@ class DateraDriver(object):
 
     def read_image_from_vol(self, ai_name):
         # read metadata
-        metadata = self.get_metadata(ai_name)
+        ai = self._name_to_ai(ai_name)
+        tenant = self._get_tenant()
+        metadata = ai.metadata.get(tenant=tenant)
         len_data = int(metadata['length'])
         rlen_data = 0
         md5hex = metadata['checksum']
@@ -594,69 +540,87 @@ class DateraDriver(object):
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         # Add data length and checksum to ai metadata
-        self.update_metadata(ai_name,
-                             {'checksum': md5hex,
-                              'length': data_written,
-                              'type': 'image'})
+        ai = self._name_to_ai(ai_name)
+        ai.metadata.set(**{'checksum': md5hex,
+                           'length': data_written,
+                           'type': 'image'})
         return data_written, md5hex
 
     def _get_sis_iqn_portal(self, ai_name):
-        iqn = None
-        portal = None
-        url = URL_TEMPLATES['ai_inst']().format(ai_name)
         data = {
             'admin_state': 'online'
         }
-        app_inst = self._issue_api_request(
-            url, method='put', body=data)['data']
-        storage_instances = app_inst["storage_instances"]
+        ai = self._name_to_ai(ai_name)
+        tenant = self._get_tenant()
+        ai.set(tenant=tenant, **data)
+        storage_instances = ai.storage_instances.list(tenant=tenant)
         si = storage_instances[0]
-        portal = si['access']['ips'][0] + ':3260'
-        iqn = si['access']['iqn']
+        portal = si.access['ips'][0] + ':3260'
+        iqn = si.access['iqn']
         return storage_instances, iqn, portal
 
     def _register_acl(self, ai_name, initiator, storage_instances):
-        initiator_name = "OpenStack_{}_{}".format(
-            self.driver_prefix, str(uuid.uuid4())[:4])
-        found = False
-        if not found:
-            data = {'id': initiator, 'name': initiator_name}
+        initiator_name = "OpenStack-{}".format(str(uuid.uuid4())[:8])
+        tenant = self._get_tenant()
+        dinit = None
+        try:
+            # We want to make sure the initiator is created under the
+            # current tenant rather than using the /root one
+            dinit = self.api.initiators.get(initiator, tenant=tenant)
+            if dinit.tenant != tenant:
+                raise dfs_sdk.exceptions.ApiNotFoundError()
+        except dfs_sdk.exceptions.ApiNotFoundError:
+            # TODO(_alastor_): Take out the 'force' flag when we fix
+            # DAT-15931
+            data = {'id': initiator, 'name': initiator_name, 'force': True}
             # Try and create the initiator
             # If we get a conflict, ignore it
-            self._issue_api_request("initiators",
-                                    method="post",
-                                    body=data,
-                                    conflict_ok=True)
-        initiator_path = "/initiators/{}".format(initiator)
-        # Create ACL with initiator for storage_instances
+            try:
+                dinit = self.api.initiators.create(tenant=tenant, **data)
+            except dfs_sdk.exceptions.ApiConflictError:
+                pass
+        initiator_path = dinit['path']
+        # Create ACL with initiator group as reference for each
+        # storage_instance in app_instance
+        # TODO(_alastor_): We need to avoid changing the ACLs if the
+        # template already specifies an ACL policy.
         for si in storage_instances:
-            acl_url = (URL_TEMPLATES['si']() +
-                       "/{}/acl_policy").format(ai_name, si['name'])
-            existing_acl = self._issue_api_request(acl_url, method="get")[
-                'data']
+            existing_acl = si.acl_policy.get(tenant=tenant)
             data = {}
-            data['initiators'] = [
-                {'path': elem['path']} for elem in existing_acl['initiators']]
+            # Grabbing only the 'path' key from each existing initiator
+            # within the existing acl. eacli --> existing acl initiator
+            eacli = []
+            for acl in existing_acl['initiators']:
+                nacl = {}
+                nacl['path'] = acl['path']
+                eacli.append(nacl)
+            data['initiators'] = eacli
             data['initiators'].append({"path": initiator_path})
-            data['initiator_groups'] = existing_acl['initiator_groups']
-            self._issue_api_request(acl_url, method="put", body=data)
-        self._si_poll(ai_name)
+            # Grabbing only the 'path' key from each existing initiator
+            # group within the existing acl. eaclig --> existing
+            # acl initiator group
+            eaclig = []
+            for acl in existing_acl['initiator_groups']:
+                nacl = {}
+                nacl['path'] = acl['path']
+                eaclig.append(nacl)
+            data['initiator_groups'] = eaclig
+            si.acl_policy.set(tenant=tenant, **data)
+            self._si_poll(si, tenant)
 
-    def _si_poll(self, bname):
+    def _si_poll(self, si, tenant):
         TIMEOUT = 10
         retry = 0
-        check_url = URL_TEMPLATES['si_inst'](STORAGE_NAME).format(bname)
         poll = True
         while poll and not retry >= TIMEOUT:
             retry += 1
-            si = self._issue_api_request(check_url)['data']
-            if si['op_state'] == 'available':
+            si = si.reload(tenant=tenant)
+            if si.op_state == 'available':
                 poll = False
             else:
                 eventlet.sleep(1)
         if retry >= TIMEOUT:
-            raise exceptions.BackendException(
-                message=_('Resource not ready.'))
+            raise exceptions.BackendException(message=_('Resource not ready.'))
 
     @contextlib.contextmanager
     def _connect_target(self, ai_name):
@@ -718,181 +682,55 @@ class DateraDriver(object):
                 except Exception:
                     pass
 
-    def _raise_response(driver, response):
-        msg = _('Request to Datera cluster returned bad status:'
-                ' %(status)s | %(reason)s') % {
-                    'status': response.status_code,
-                    'reason': response.reason}
-        LOG.error(msg)
-        raise DateraAPIException(msg)
-
-    def _handle_bad_status(self,
-                           response,
-                           connection_string,
-                           method,
-                           payload,
-                           header,
-                           cert_data,
-                           sensitive=False,
-                           conflict_ok=False):
-        if (response.status_code == http_client.BAD_REQUEST and
-                connection_string.endswith("api_versions")):
-            # Raise the exception, but don't log any error.  We'll just fall
-            # back to the old style of determining API version.  We make this
-            # request a lot, so logging it is just noise
-            raise DateraAPIException()
-        if response.status_code == http_client.NOT_FOUND:
-            raise exceptions.NotFound(response.json()['message'])
-        elif response.status_code in [http_client.FORBIDDEN,
-                                      http_client.UNAUTHORIZED]:
-            raise exceptions.NotAuthenticated()
-        elif response.status_code == http_client.CONFLICT and conflict_ok:
-            # Don't raise, because we're expecting a conflict
-            pass
-        elif response.status_code == http_client.CONFLICT and not conflict_ok:
-            raise exceptions.Duplicate()
-        elif response.status_code == http_client.SERVICE_UNAVAILABLE:
-            current_retry = 0
-            while current_retry <= self.retry_attempts:
-                LOG.debug("Datera 503 response, trying request again")
-                eventlet.sleep(self.interval)
-                resp = self._request(connection_string,
-                                     method,
-                                     payload,
-                                     header,
-                                     cert_data)
-                if resp.ok:
-                    return response.json()
-                elif resp.status_code != http_client.SERVICE_UNAVAILABLE:
-                    self._raise_response(resp)
-        else:
-            self._raise_response(response)
-
-    @_authenticated
-    def _issue_api_request(self, resource_url, method='get', body=None,
-                           sensitive=False, conflict_ok=False):
-        """All API requests to Datera cluster go through this method.
-
-        :param resource_url: the url of the resource
-        :param method: the request verb
-        :param body: a dict with options for the action_type
-        :param sensitive: Bool, whether request should be obscured from logs
-        :param conflict_ok: Bool, True to suppress ConflictError exceptions
-        during this request
-        :returns: a dict of the response from the Datera cluster
-        """
-        api_version = self.API_VERSION
-        host = self.san_ip
-        port = self.san_port
-        api_token = self.datera_api_token
-
-        payload = json.dumps(body, ensure_ascii=False)
-        payload.encode('utf-8')
-
-        header = {'Content-Type': 'application/json; charset=utf-8'}
-        header.update(self.HEADER_DATA)
-
-        protocol = 'http'
-        if self.use_ssl:
-            protocol = 'https'
-
-        if api_token:
-            header['Auth-Token'] = api_token
-
-        tenant = self.tenant_id
-        if tenant == "all":
-            header['tenant'] = tenant
-        elif tenant and '/root' not in tenant:
-            header['tenant'] = "".join(("/root/", tenant))
-        elif tenant and '/root' in tenant:
-            header['tenant'] = tenant
-        elif self.tenant_id and self.tenant_id.lower() != "map":
-            header['tenant'] = self.tenant_id
-
-        client_cert = self.client_cert
-        client_cert_key = self.client_cert_key
-        cert_data = None
-
-        if client_cert:
-            protocol = 'https'
-            cert_data = (client_cert, client_cert_key)
-
-        connection_string = '%s://%s:%s/v%s/%s' % (protocol, host, port,
-                                                   api_version, resource_url)
-
-        request_id = uuid.uuid4()
-
-        if self.do_profile:
-            t1 = time.time()
-        if not sensitive:
-            LOG.debug("\nDatera Trace ID: %(tid)s\n"
-                      "Datera Request ID: %(rid)s\n"
-                      "Datera Request URL: /v%(api)s/%(url)s\n"
-                      "Datera Request Method: %(method)s\n"
-                      "Datera Request Payload: %(payload)s\n"
-                      "Datera Request Headers: %(header)s\n",
-                      {'tid': None,
-                       'rid': request_id,
-                       'api': api_version,
-                       'url': resource_url,
-                       'method': method,
-                       'payload': payload,
-                       'header': header})
-        response = self._request(connection_string,
-                                 method,
-                                 payload,
-                                 header,
-                                 cert_data)
-
-        data = response.json()
-
-        timedelta = "Profiling disabled"
-        if self.do_profile:
-            t2 = time.time()
-            timedelta = round(t2 - t1, 3)
-        if not sensitive:
-            LOG.debug("\nDatera Trace ID: %(tid)s\n"
-                      "Datera Response ID: %(rid)s\n"
-                      "Datera Response TimeDelta: %(delta)ss\n"
-                      "Datera Response URL: %(url)s\n"
-                      "Datera Response Payload: %(payload)s\n"
-                      "Datera Response Object: %(obj)s\n",
-                      {'tid': None,
-                       'rid': request_id,
-                       'delta': timedelta,
-                       'url': response.url,
-                       'payload': payload,
-                       'obj': vars(response)})
-        if not response.ok:
-            self._handle_bad_status(response,
-                                    connection_string,
-                                    method,
-                                    payload,
-                                    header,
-                                    cert_data,
-                                    conflict_ok=conflict_ok)
-
-        return data
-
-    def _request(self, connection_string, method, payload, header, cert_data):
-        LOG.debug("Endpoint for Datera API call: %s", connection_string)
-        LOG.debug("Payload for Datera API call: %s", payload)
-        try:
-            response = getattr(requests, method)(connection_string,
-                                                 data=payload, headers=header,
-                                                 verify=False, cert=cert_data)
-            return response
-        except requests.exceptions.RequestException as ex:
-            msg = _(
-                'Failed to make a request to Datera cluster endpoint due '
-                'to the following reason: %s') % six.text_type(
-                ex.message)
-            LOG.error(msg)
-            raise DateraAPIException(msg)
-
     @staticmethod
     def _execute(cmd):
         parts = shlex.split(cmd)
         stdout, stderr = putils.execute(*parts, root_helper=_get_root_helper(),
                                         run_as_root=True)
         return stdout, stderr
+
+    @staticmethod
+    def _format_tenant(tenant):
+        if tenant == "all" or (
+                tenant and ('/root' in tenant or 'root' in tenant)):
+            return '/root'
+        elif tenant and ('/root' not in tenant and 'root' not in tenant):
+            return "/" + "/".join(('root', tenant)).strip('/')
+        return tenant
+
+    def _create_tenant(self):
+        if self.tenant_id:
+            name = self.tenant_id.replace('root', '').strip('/')
+        else:
+            name = 'root'
+        if name:
+            try:
+                self.api.tenants.create(name=name)
+            except dfs_sdk.exceptions.ApiConflictError:
+                LOG.debug("Tenant {} already exists".format(name))
+        return self._format_tenant(name)
+
+    def _get_tenant(self):
+        if not self.tenant_id:
+            return self._format_tenant('root')
+        return self._format_tenant(self.tenant_id)
+
+    def _name_to_ai(self, name):
+        tenant = self._get_tenant()
+        try:
+            # api.tenants.get needs a non '/'-prefixed tenant id
+            self.api.tenants.get(tenant.strip('/'))
+        except dfs_sdk.exceptions.ApiNotFoundError:
+            self._create_tenant()
+        ais = self.api.app_instances.list(
+            filter='match(name,.*{}.*)'.format(name),
+            tenant=tenant)
+        if not ais:
+            raise exceptions.NotFound(image=name)
+        return ais[0]
+
+    def _name_to_vol(self, name):
+        ai = self._name_to_ai(name)
+        tenant = self._get_tenant()
+        si = ai.storage_instances.list(tenant=tenant)[0]
+        return si.volumes.list(tenant=tenant)[0]
