@@ -39,9 +39,16 @@ from glance_store.i18n import _
 from glance_store import capabilities
 from glance_store import exceptions
 from glance_store.common import utils
+from glance_store import driver as gdriver
 
 from os_brick.initiator import connector as os_conn
 from os_brick import exception as brick_exception
+
+fallback = False
+
+if not hasattr(gdriver, 'back_compat_add'):
+    gdriver.back_compat_add = lambda x: x
+    fallback = True
 
 
 CONF = cfg.CONF
@@ -127,7 +134,7 @@ class DateraImage(object):
         self._vol_size = None
 
     @classmethod
-    def create(cls, driver, image_id, image_file, image_size):
+    def create(cls, driver, image_id, image_file, image_size, hashing_algo):
         """
         data_size must be in MiB
         """
@@ -149,9 +156,9 @@ class DateraImage(object):
         location = '/'.join(ai['path'].split('/')[:-1] + [image_id])
         image = cls(image_id, driver.san_ip, driver.san_port, location, driver)
         # Copy image data to volume
-        data_size, md5hex = driver.copy_image_to_vol(
-            image_id, image_file, incremental)
-        return image, data_size, md5hex
+        data_size, md5hex, oshex = driver.copy_image_to_vol(
+            image_id, image_file, incremental, hashing_algo)
+        return image, data_size, md5hex, oshex
 
     def read(self):
         reader = self.driver.read_image_from_vol(self.image_id)
@@ -229,6 +236,14 @@ class Store(glance_store.driver.Store):
             raise exceptions.BadStoreConfiguration(
                 store_name='datera',
                 reason=reason)
+        if fallback:
+            @capabilities.check
+            def _add(self, image_id, image_file, image_size,
+                     context=None, verifier=None):
+                return self.add(image_id, image_file, image_size, None,
+                                context=context, verifier=verifier)
+
+            self.add = _add
 
     def get_schemes(self):
         """
@@ -279,8 +294,9 @@ class Store(glance_store.driver.Store):
             LOG.error(e, exc_info=1)
             raise
 
+    @gdriver.back_compat_add
     @capabilities.check
-    def add(self, image_id, image_file, image_size, context=None,
+    def add(self, image_id, image_file, image_size, hashing_algo, context=None,
             verifier=None):
         """
         Stores an image file with supplied identifier to the backend
@@ -300,9 +316,15 @@ class Store(glance_store.driver.Store):
                     "image_size %s, context: %s, verifier: %s" %
                     (image_id, image_file, image_size, context, verifier)))
         try:
-            image, data_size, md5hex = DateraImage.create(
-                self.driver, image_id, image_file, image_size)
-            return image.get_uri(), data_size, md5hex, {}
+            # Lots of workarounds here because upstream broke compatibility
+            # with older versions
+            image, data_size, md5hex, oshex = DateraImage.create(
+                self.driver, image_id, image_file, image_size,
+                hashing_algo if hashing_algo else 'md5')
+            if hashing_algo is None:
+                return image.get_uri(), data_size, md5hex, {}
+            else:
+                return image.get_uri(), data_size, md5hex, oshex, {}
         except Exception as e:
             # Logging exceptions here because Glance has a tendancy to
             # suppress them
@@ -335,7 +357,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2018.11.12.0'
+    VERSION = '2018.11.12.1'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -351,6 +373,9 @@ class DateraDriver(object):
                        OS-IMAGE-<image-id>
         2018.11.12.0 -- Fixed bug that broke support for v2.1 API-only versions
                         of the product
+        2018.11.12.1 -- Added support for later versions of openstack.  Added
+                        fallback mechanism to ensure backwards compatibility
+                        is maintained.
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
@@ -501,8 +526,10 @@ class DateraDriver(object):
                         yield data
             self._execute("chmod o-r {}".format(device))
 
-    def copy_image_to_vol(self, ai_name, image_file, incremental):
+    def copy_image_to_vol(self, ai_name, image_file, incremental,
+                          hashing_algo):
         md5 = hashlib.md5()
+        os_hash_value = hashlib.new(str(hashing_algo))
         data_written = 0
         with self._connect_target(ai_name) as device:
             self._execute("chmod o+w {}".format(device))
@@ -524,6 +551,7 @@ class DateraDriver(object):
                         # Force the SCSI bus to scan for extended volume
                         self.rescan_device(device, vsize * units.Gi)
                     md5.update(data)
+                    os_hash_value.update(data)
                     with io.open(device, 'wb') as outfile:
                         outfile.seek(data_written)
                         outfile.write(data)
@@ -541,12 +569,13 @@ class DateraDriver(object):
                                   (len(data), outfile.tell())))
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
+        oshex = os_hash_value.hexdigest()
         # Add data length and checksum to ai metadata
         ai = self._name_to_ai(ai_name)
         ai.metadata.set(**{'checksum': md5hex,
                            'length': data_written,
                            'type': 'image'})
-        return data_written, md5hex
+        return data_written, md5hex, oshex
 
     def _get_sis_iqn_portal(self, ai_name):
         data = {
@@ -569,7 +598,7 @@ class DateraDriver(object):
             # We want to make sure the initiator is created under the
             # current tenant rather than using the /root one
             dinit = self.api.initiators.get(initiator, tenant=tenant)
-            if dinit.tenant != tenant:
+            if self.api.context.version != "v2.1" and dinit.tenant != tenant:
                 raise dfs_sdk.exceptions.ApiNotFoundError()
         except dfs_sdk.exceptions.ApiNotFoundError:
             # TODO(_alastor_): Take out the 'force' flag when we fix
