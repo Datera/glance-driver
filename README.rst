@@ -16,6 +16,11 @@ Datera Glance Image Backend Driver
      - Capabilities Introduced
      - Supported Datera Product Versions
    * - Master
+     - v2018.11.12.0
+     - 2018.11.12.0
+     - Fixed bug that broke support for v2.1 API-only versions of the product
+     - 2.2.X, 3.X+
+   * - Master
      - v2018.7.18.0
      - 2018.7.18.0
      - Ported driver to Datera Python-SDK, changed initiators to be created within a tenant rather than inherited from the root tenant.  Changed naming convention to OS-IMAGE-<image-id>

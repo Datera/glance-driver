@@ -335,7 +335,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2018.7.18.0'
+    VERSION = '2018.11.12.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -349,6 +349,8 @@ class DateraDriver(object):
                        to be created within a tenant rather than inherited
                        from the root tenant.  Changed naming convention to
                        OS-IMAGE-<image-id>
+        2018.11.12.0 -- Fixed bug that broke support for v2.1 API-only versions
+                        of the product
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
@@ -378,12 +380,12 @@ class DateraDriver(object):
                 'datera_san_ip', 'datera_san_login', 'datera_san_password'])
 
         for apiv in reversed(API_VERSIONS):
-            api = dfs_sdk.get_api(self.san_ip,
-                                  self.username,
-                                  self.password,
-                                  'v{}'.format(apiv),
-                                  disable_log=True)
             try:
+                api = dfs_sdk.get_api(self.san_ip,
+                                      self.username,
+                                      self.password,
+                                      'v{}'.format(apiv),
+                                      disable_log=True)
                 system = api.system.get()
                 LOG.debug('Connected successfully to cluster: %s', system.name)
                 self.api = api
