@@ -236,14 +236,6 @@ class Store(glance_store.driver.Store):
             raise exceptions.BadStoreConfiguration(
                 store_name='datera',
                 reason=reason)
-        if fallback:
-            @capabilities.check
-            def _add(self, image_id, image_file, image_size,
-                     context=None, verifier=None):
-                return self.add(image_id, image_file, image_size, None,
-                                context=context, verifier=verifier)
-
-            self.add = _add
 
     def get_schemes(self):
         """
@@ -294,10 +286,9 @@ class Store(glance_store.driver.Store):
             LOG.error(e, exc_info=1)
             raise
 
-    @gdriver.back_compat_add
     @capabilities.check
-    def add(self, image_id, image_file, image_size, hashing_algo, context=None,
-            verifier=None):
+    def _add__old(self, image_id, image_file, image_size, context=None,
+                  verifier=None):
         """
         Stores an image file with supplied identifier to the backend
         storage system and returns a tuple containing information
@@ -319,17 +310,52 @@ class Store(glance_store.driver.Store):
             # Lots of workarounds here because upstream broke compatibility
             # with older versions
             image, data_size, md5hex, oshex = DateraImage.create(
-                self.driver, image_id, image_file, image_size,
-                hashing_algo if hashing_algo else 'md5')
-            if hashing_algo is None:
-                return image.get_uri(), data_size, md5hex, {}
-            else:
-                return image.get_uri(), data_size, md5hex, oshex, {}
+                self.driver, image_id, image_file, image_size, 'md5')
+            return image.get_uri(), data_size, md5hex, {}
         except Exception as e:
             # Logging exceptions here because Glance has a tendancy to
             # suppress them
             LOG.error(e, exc_info=1)
             raise
+
+    @gdriver.back_compat_add
+    @capabilities.check
+    def _add__new(self, image_id, image_file, image_size, hashing_algo,
+                  context=None, verifier=None):
+        """
+        Stores an image file with supplied identifier to the backend
+        storage system and returns a tuple containing information
+        about the stored image.
+
+        :param image_id: The opaque image identifier
+        :param image_file: The image data to write, as a file-like object
+        :param image_size: The size of the image data to write, in bytes
+        :param hashing_algo: The hashing algorithm to use
+
+        :retval: tuple of URL in backing store, bytes written, checksum
+               and a dictionary with storage system specific information
+        :raises: `glance_store.exceptions.Duplicate` if the image already
+                existed
+        """
+        LOG.debug(_("add() called with image_id: %s, image_file: %s, "
+                    "image_size %s, context: %s, verifier: %s" %
+                    (image_id, image_file, image_size, context, verifier)))
+        try:
+            # Lots of workarounds here because upstream broke compatibility
+            # with older versions
+            image, data_size, md5hex, oshex = DateraImage.create(
+                self.driver, image_id, image_file, image_size, hashing_algo)
+            return image.get_uri(), data_size, md5hex, oshex, {}
+        except Exception as e:
+            # Logging exceptions here because Glance has a tendancy to
+            # suppress them
+            LOG.error(e, exc_info=1)
+            raise
+
+    def add(self, *args, **kwargs):
+        if fallback:
+            return self._add__old(*args, **kwargs)
+        return self._add__new(*args, **kwargs)
 
     @capabilities.check
     def delete(self, location, context=None):
