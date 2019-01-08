@@ -599,9 +599,11 @@ class DateraDriver(object):
         oshex = os_hash_value.hexdigest()
         # Add data length and checksum to ai metadata
         ai = self._name_to_ai(ai_name)
+        tenant = self._get_tenant()
         ai.metadata.set(**{'checksum': md5hex,
                            'length': data_written,
-                           'type': 'image'})
+                           'type': 'image'},
+                        tenant=tenant)
         return data_written, md5hex, oshex
 
     def _get_sis_iqn_portal(self, ai_name):
