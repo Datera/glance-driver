@@ -124,6 +124,7 @@ class DateraImage(object):
     as a distributed volume, but from the perspective of an end-user they are
     a single block device
     """
+
     def __init__(self, image_id, host, port, location, driver):
         self.image_id = image_id
         self.host = host
@@ -545,7 +546,7 @@ class DateraDriver(object):
                         LOG.debug(_("Length Data. Metadata %s, Read %s" % (
                                   len_data, rlen_data)))
                         LOG.debug(_("MD5. Metadata %s, Read %s" % (
-                                 md5hex, check.hexdigest())))
+                            md5hex, check.hexdigest())))
                         assert check.hexdigest() == md5hex
                         yield data
                         break
@@ -600,15 +601,15 @@ class DateraDriver(object):
                         md5.update(data)
                         outfile.write(data)
                         LOG.debug(_("Writing Data. Length: %s, Offset: %s" %
-                                  (len(data), outfile.tell())))
+                                    (len(data), outfile.tell())))
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         oshex = os_hash_value.hexdigest()
         # Add data length and checksum to ai metadata
         ai = self._name_to_ai(ai_name)
         tenant = self._get_tenant()
-        ai.metadata.set(tenant=tenant, 
-			**{'checksum': md5hex,
+        ai.metadata.set(tenant=tenant,
+                        **{'checksum': md5hex,
                            'length': data_written,
                            'type': 'image'})
         return data_written, md5hex, oshex
