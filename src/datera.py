@@ -138,6 +138,9 @@ class DateraImage(object):
         """
         data_size must be in MiB
         """
+        LOG.debug("Creating Datera image with driver: %s, image_id %s, "
+                  "image_file: %s, image_size: %s, hashing_algo: %s",
+                  driver, image_id, image_file, image_size, hashing_algo)
         # Use default size if we're not given one
         incremental = False
         if image_size == 0:
@@ -519,6 +522,7 @@ class DateraDriver(object):
 
     def read_image_from_vol(self, ai_name):
         # read metadata
+        LOG.debug("Reading image from AppInstance: %s", ai_name)
         ai = self._name_to_ai(ai_name)
         tenant = self._get_tenant()
         metadata = ai.metadata.get(tenant=tenant)
@@ -555,6 +559,9 @@ class DateraDriver(object):
 
     def copy_image_to_vol(self, ai_name, image_file, incremental,
                           hashing_algo):
+        LOG.debug("Copying image to AppInstance: %s, image_file: %s, "
+                  "incremental: %s, hashing_algo: %s",
+                  ai_name, image_file, incremental, hashing_algo)
         md5 = hashlib.md5()
         os_hash_value = hashlib.new(str(hashing_algo))
         data_written = 0
@@ -673,6 +680,7 @@ class DateraDriver(object):
         retry = 0
         poll = True
         while poll and not retry >= TIMEOUT:
+            LOG.debug("Polling StorageInstance: %s", si.name)
             retry += 1
             si = si.reload(tenant=tenant)
             if si.op_state == 'available':
