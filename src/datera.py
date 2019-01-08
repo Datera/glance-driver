@@ -607,10 +607,10 @@ class DateraDriver(object):
         # Add data length and checksum to ai metadata
         ai = self._name_to_ai(ai_name)
         tenant = self._get_tenant()
-        ai.metadata.set(**{'checksum': md5hex,
+        ai.metadata.set(tenant=tenant, 
+			**{'checksum': md5hex,
                            'length': data_written,
-                           'type': 'image'},
-                        tenant=tenant)
+                           'type': 'image'})
         return data_written, md5hex, oshex
 
     def _get_sis_iqn_portal(self, ai_name):
