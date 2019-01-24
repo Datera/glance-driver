@@ -387,7 +387,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2018.11.14.0'
+    VERSION = '2019.1.24.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -407,6 +407,7 @@ class DateraDriver(object):
                         fallback mechanism to ensure backwards compatibility
                         is maintained.
         2018.11.14.0 -- Fixed broken support for pike and earlier releases
+        2019.1.24.0 -- Tenancy fix during metadata call
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
