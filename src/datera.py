@@ -384,7 +384,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2019.2.25.0'
+    VERSION = '2019.3.25.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -406,6 +406,8 @@ class DateraDriver(object):
         2018.11.14.0 -- Fixed broken support for pike and earlier releases
         2019.1.24.0 -- Tenancy fix during metadata call
         2019.2.25.0 -- Removed required=True from all parameters
+        2019.3.25.0 -- Bugfix for missing parentheses to string format
+                       arguments
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
@@ -518,7 +520,7 @@ class DateraDriver(object):
         if new_size != size:
             raise EnvironmentError(_(
                 "New blockdevice size does not match requested size, "
-                "[%s != %s]" % size, new_size))
+                "[%s != %s]" % (size, new_size)))
 
     def read_image_from_vol(self, ai_name):
         # read metadata
