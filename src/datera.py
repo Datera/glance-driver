@@ -23,6 +23,7 @@ import math
 import os
 import re
 import shlex
+import time
 import uuid
 
 import eventlet
@@ -384,7 +385,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2019.3.25.0'
+    VERSION = '2019.3.26.0'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -408,6 +409,7 @@ class DateraDriver(object):
         2019.2.25.0 -- Removed required=True from all parameters
         2019.3.25.0 -- Bugfix for missing parentheses to string format
                        arguments
+        2019.3.26.0 -- Added a poller to rescan_device
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
@@ -514,13 +516,19 @@ class DateraDriver(object):
     def rescan_device(self, device, size):
         """ Size must be in bytes """
         # Rescan ISCSI devices
-        self._execute("iscsiadm -m session -R")
-        result, _ = self._execute("blockdev --getsize64 %s" % device)
-        new_size = int(result.strip())
-        if new_size != size:
-            raise EnvironmentError(_(
-                "New blockdevice size does not match requested size, "
-                "[%s != %s]" % (size, new_size)))
+        retry = 0
+        new_size = 0
+        while retry <= self.retry_attempts:
+            self._execute("iscsiadm -m session -R")
+            result, _ = self._execute("blockdev --getsize64 %s" % device)
+            new_size = int(result.strip())
+            if new_size == size:
+                return
+            retry += 1
+            time.sleep(self.interval)
+        raise EnvironmentError(
+            "New blockdevice size does not match requested size, "
+            "[%s != %s]" % (size, new_size))
 
     def read_image_from_vol(self, ai_name):
         # read metadata
