@@ -536,7 +536,7 @@ class DateraDriver(object):
             self._echo_scsi_command(rescan, "1")
             result, _ = self._execute("blockdev --getsize64 %s" % device)
             new_size = int(result.strip())
-            if new_size == size:
+            if new_size >= size:
                 return
             retry += 1
             time.sleep(self.interval)
