@@ -94,7 +94,15 @@ _DATERA_OPTS = [
     cfg.IntOpt('datera_default_image_size',
                default=1,
                help="(GiB) This determines the starting image size if no size "
-                    "is provided for an image on creation")]
+                    "is provided for an image on creation"),
+    cfg.IntOpt('datera_retry_attempts',
+               default=30,
+               help="Number of attempts the Datera driver should make before "
+                    "failing to acquire a resource"),
+    cfg.IntOpt('datera_retry_interval',
+               default=2,
+               help="Interval between retry attempts when acquiring a "
+                    "resource")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -232,7 +240,9 @@ class Store(glance_store.driver.Store):
                 self.conf.glance_store.datera_replica_count,
                 self.conf.glance_store.datera_placement_mode,
                 self.conf.glance_store.datera_chunk_size,
-                self.conf.glance_store.datera_default_image_size)
+                self.conf.glance_store.datera_default_image_size,
+                self.conf.glance_store.datera_retry_attempts,
+                self.conf.glance_store.datera_retry_interval)
         except cfg.ConfigFileValueError as e:
             reason = _("Error in Datera store configuration: %s") % e
             raise exceptions.BadStoreConfiguration(
@@ -414,8 +424,9 @@ class DateraDriver(object):
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
     def __init__(self, san_ip, username, password, port, tenant, replica_count,
-                 placement_mode, chunk_size, default_image_size, ssl=True,
-                 client_cert=None, client_cert_key=None):
+                 placement_mode, chunk_size, default_image_size,
+                 retry_attempts, retry_interval, ssl=True, client_cert=None,
+                 client_cert_key=None):
         self.san_ip = san_ip
         self.username = username
         self.password = password
@@ -430,8 +441,8 @@ class DateraDriver(object):
         self.client_cert = client_cert
         self.client_cert_key = client_cert_key
         self.do_profile = True
-        self.retry_attempts = 5
-        self.interval = 2
+        self.retry_attempts = retry_attempts
+        self.interval = retry_interval
         self.default_size = default_image_size
 
         if not all((self.san_ip, self.username, self.password)):
@@ -518,8 +529,11 @@ class DateraDriver(object):
         # Rescan ISCSI devices
         retry = 0
         new_size = 0
+        d = device.split("/")[-1].strip()
+        rescan = "/sys/block/{}/device/rescan".format(d)
         while retry <= self.retry_attempts:
-            self._execute("iscsiadm -m session -R")
+            LOG.debug("Rescanning device: %s", rescan)
+            self._echo_scsi_command(rescan, "1")
             result, _ = self._execute("blockdev --getsize64 %s" % device)
             new_size = int(result.strip())
             if new_size == size:
@@ -766,6 +780,15 @@ class DateraDriver(object):
         stdout, stderr = putils.execute(*parts, root_helper=_get_root_helper(),
                                         run_as_root=True)
         return stdout, stderr
+
+    def _echo_scsi_command(self, path, content):
+        """Used to echo strings to scsi subsystem."""
+
+        args = ["-a", path]
+        kwargs = dict(process_input=content,
+                      run_as_root=True,
+                      root_helper=_get_root_helper())
+        return putils.execute('tee', *args, **kwargs)
 
     @staticmethod
     def _format_tenant(tenant):

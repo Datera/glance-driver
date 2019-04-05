@@ -3,3 +3,4 @@ chmod: CommandFilter, chmod, root
 iscsiadm: CommandFilter, iscsiadm, root
 blockdev: CommandFilter, blockdev, root
 sync: CommandFilter, sync, root
+tee: CommandFilter, tee, root
