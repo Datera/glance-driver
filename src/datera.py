@@ -522,7 +522,15 @@ class DateraDriver(object):
     def extend_vol(self, ai_name, size):
         vol = self._name_to_vol(ai_name)
         tenant = self._get_tenant()
-        return vol.set(size=size, tenant=tenant)
+        vol = vol.set(size=size, tenant=tenant)
+        attempts = self.retry_attempts
+        while vol.op_state != "available":
+            time.sleep(self.interval)
+            vol = vol.reload(tenant=tenant)
+            attempts -= 1
+            if attempts <= 0:
+                raise EnvironmentError(
+                    "Volume %s did not extend within retry period" % vol.name)
 
     def rescan_device(self, device, size):
         """ Size must be in bytes """
@@ -589,42 +597,45 @@ class DateraDriver(object):
         md5 = hashlib.md5()
         os_hash_value = hashlib.new(str(hashing_algo))
         data_written = 0
-        with self._connect_target(ai_name) as device:
-            self._execute("chmod o+w {}".format(device))
-            chunks = utils.chunkreadable(image_file, self.chunk_size)
-            if incremental:
-                vsize = self.get_vol_size(ai_name)  # In GiB
-                for data in chunks:
-                    len_data = len(data)
-                    # bytes comparison
-                    if len_data + data_written > vsize * units.Gi:
-                        LOG.debug(_(
-                            "Data %s exceeds volume size of %s extending "
-                            "%s bytes" % (len_data + data_written,
-                                          vsize * units.Gi,
-                                          self.chunk_size)))
-                        # In GiB
-                        vsize += (self.chunk_size / units.Gi)
-                        self.extend_vol(ai_name, vsize)
-                        # Force the SCSI bus to scan for extended volume
-                        self.rescan_device(device, vsize * units.Gi)
-                    md5.update(data)
-                    os_hash_value.update(data)
+        chunks = utils.chunkreadable(image_file, self.chunk_size)
+        if incremental:
+            vsize = self.get_vol_size(ai_name)  # In GiB
+            for data in chunks:
+                len_data = len(data)
+                # bytes comparison
+                if len_data + data_written > vsize * units.Gi:
+                    LOG.debug(_(
+                        "Data %s exceeds volume size of %s extending "
+                        "%s bytes" % (len_data + data_written,
+                                      vsize * units.Gi,
+                                      self.chunk_size)))
+                    # In GiB
+                    vsize += (self.chunk_size / units.Gi)
+                    self.extend_vol(ai_name, vsize)
+                    # Force the SCSI bus to scan for extended volume
+                md5.update(data)
+                os_hash_value.update(data)
+                with self._connect_target(ai_name) as device:
+                    self._execute("chmod o+w {}".format(device))
+                    self.rescan_device(device, vsize * units.Gi)
                     with io.open(device, 'wb') as outfile:
                         outfile.seek(data_written)
                         outfile.write(data)
                     data_written += len_data
                     LOG.debug(_("Writing Data. Length: %s" % len(data)))
                     self._execute("sync")
-            else:
+        else:
+            with self._connect_target(ai_name) as device:
+                self._execute("chmod o+w {}".format(device))
                 with io.open(device, 'wb') as outfile:
                     for data in chunks:
                         # Write image data
                         data_written += len(data)
                         md5.update(data)
                         outfile.write(data)
-                        LOG.debug(_("Writing Data. Length: %s, Offset: %s" %
-                                    (len(data), outfile.tell())))
+                        LOG.debug(
+                            _("Writing Data. Length: %s, Offset: %s" %
+                                (len(data), outfile.tell())))
             self._execute("chmod o-w {}".format(device))
         md5hex = md5.hexdigest()
         oshex = os_hash_value.hexdigest()
@@ -717,6 +728,7 @@ class DateraDriver(object):
     @contextlib.contextmanager
     def _connect_target(self, ai_name):
         connector = None
+        LOG.debug("Connecting to AppInstance %s", ai_name)
         try:
             sis, iqn, portal = self._get_sis_iqn_portal(ai_name)
             conn = {'driver_volume_type': 'iscsi',
