@@ -540,7 +540,8 @@ class DateraDriver(object):
             retry -= 1
             if retry <= 0 or time.time() - start_time >= self.max_timeout:
                 raise EnvironmentError(
-                    "Volume %s did not extend within retry period" % vol.name)
+                    "Volume %s did not extend within retry period. timeout "
+                    "%ss" % vol.name, self.max_timeout)
         LOG.debug("{} successfully increased to {} after {}".format(
             ai_name, size, round(start_time - time.time(), 2)))
 
