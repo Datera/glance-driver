@@ -102,7 +102,11 @@ _DATERA_OPTS = [
     cfg.IntOpt('datera_retry_interval',
                default=2,
                help="Interval between retry attempts when acquiring a "
-                    "resource")]
+                    "resource"),
+    cfg.IntOpt('datera_operation_max_timeout',
+               default=600,
+               help="Total max timeout for any communication between the "
+                    "driver and the Datera backend")]
 
 STORAGE_NAME = 'storage-1'
 VOLUME_NAME = 'volume-1'
@@ -242,7 +246,8 @@ class Store(glance_store.driver.Store):
                 self.conf.glance_store.datera_chunk_size,
                 self.conf.glance_store.datera_default_image_size,
                 self.conf.glance_store.datera_retry_attempts,
-                self.conf.glance_store.datera_retry_interval)
+                self.conf.glance_store.datera_retry_interval,
+                self.conf.glance_store.datera_operation_max_timeout)
         except cfg.ConfigFileValueError as e:
             reason = _("Error in Datera store configuration: %s") % e
             raise exceptions.BadStoreConfiguration(
@@ -425,8 +430,8 @@ class DateraDriver(object):
 
     def __init__(self, san_ip, username, password, port, tenant, replica_count,
                  placement_mode, chunk_size, default_image_size,
-                 retry_attempts, retry_interval, ssl=True, client_cert=None,
-                 client_cert_key=None):
+                 retry_attempts, retry_interval, max_timeout, ssl=True,
+                 client_cert=None, client_cert_key=None):
         self.san_ip = san_ip
         self.username = username
         self.password = password
@@ -444,6 +449,7 @@ class DateraDriver(object):
         self.retry_attempts = retry_attempts
         self.interval = retry_interval
         self.default_size = default_image_size
+        self.max_timeout = max_timeout
 
         if not all((self.san_ip, self.username, self.password)):
             raise exceptions.MissingCredentialError(required=[
@@ -523,14 +529,20 @@ class DateraDriver(object):
         vol = self._name_to_vol(ai_name)
         tenant = self._get_tenant()
         vol = vol.set(size=size, tenant=tenant)
-        attempts = self.retry_attempts
-        while vol.op_state != "available":
+        self.poll_for_resize(ai_name, vol, size, tenant)
+
+    def poll_for_resize(self, ai_name, vol, size, tenant):
+        retry = self.retry_attempts
+        start_time = time.time()
+        while vol.op_state != "available" and vol.size != size:
             time.sleep(self.interval)
             vol = vol.reload(tenant=tenant)
-            attempts -= 1
-            if attempts <= 0:
+            retry -= 1
+            if retry <= 0 or time.time() - start_time >= self.max_timeout:
                 raise EnvironmentError(
                     "Volume %s did not extend within retry period" % vol.name)
+        LOG.debug("{} successfully increased to {} after {}".format(
+            ai_name, size, round(start_time - time.time(), 2)))
 
     def rescan_device(self, device, size):
         """ Size must be in bytes """
@@ -539,7 +551,9 @@ class DateraDriver(object):
         new_size = 0
         d = device.split("/")[-1].strip()
         rescan = "/sys/block/{}/device/rescan".format(d)
-        while retry <= self.retry_attempts:
+        start_time = time.time()
+        while (time.time() - start_time < self.max_timeout and
+               retry <= self.retry_attempts):
             LOG.debug("Rescanning device: %s", rescan)
             self._echo_scsi_command(rescan, "1")
             result, _ = self._execute("blockdev --getsize64 %s" % device)
@@ -589,6 +603,51 @@ class DateraDriver(object):
                         yield data
             self._execute("chmod o-r {}".format(device))
 
+    def perform_incremental_write(self, ai_name, chunks, md5, os_hash_value):
+        data_written = 0
+        vsize = self.get_vol_size(ai_name)  # In GiB
+        for data in chunks:
+            len_data = len(data)
+            # bytes comparison
+            if len_data + data_written > vsize * units.Gi:
+                LOG.debug(_(
+                    "Data %s exceeds volume size of %s extending "
+                    "%s bytes" % (len_data + data_written,
+                                  vsize * units.Gi,
+                                  self.chunk_size)))
+                # In GiB
+                vsize += (self.chunk_size / units.Gi)
+                self.extend_vol(ai_name, vsize)
+                # Force the SCSI bus to scan for extended volume
+            md5.update(data)
+            os_hash_value.update(data)
+            with self._connect_target(ai_name) as device:
+                self._execute("chmod o+w {}".format(device))
+                self.rescan_device(device, vsize * units.Gi)
+                with io.open(device, 'wb') as outfile:
+                    outfile.seek(data_written)
+                    outfile.write(data)
+                data_written += len_data
+                LOG.debug(_("Writing Data. Length: %s" % len(data)))
+                self._execute("sync")
+        return data_written
+
+    def perform_total_write(self, ai_name, chunks, md5):
+        data_written = 0
+        with self._connect_target(ai_name) as device:
+            self._execute("chmod o+w {}".format(device))
+            with io.open(device, 'wb') as outfile:
+                for data in chunks:
+                    # Write image data
+                    data_written += len(data)
+                    md5.update(data)
+                    outfile.write(data)
+                    LOG.debug(
+                        _("Writing Data. Length: %s, Offset: %s" %
+                            (len(data), outfile.tell())))
+            self._execute("chmod o-w {}".format(device))
+        return data_written
+
     def copy_image_to_vol(self, ai_name, image_file, incremental,
                           hashing_algo):
         LOG.debug("Copying image to AppInstance: %s, image_file: %s, "
@@ -596,47 +655,13 @@ class DateraDriver(object):
                   ai_name, image_file, incremental, hashing_algo)
         md5 = hashlib.md5()
         os_hash_value = hashlib.new(str(hashing_algo))
-        data_written = 0
         chunks = utils.chunkreadable(image_file, self.chunk_size)
+        # Incremental indicates we don't know the image size beforehand
         if incremental:
-            vsize = self.get_vol_size(ai_name)  # In GiB
-            for data in chunks:
-                len_data = len(data)
-                # bytes comparison
-                if len_data + data_written > vsize * units.Gi:
-                    LOG.debug(_(
-                        "Data %s exceeds volume size of %s extending "
-                        "%s bytes" % (len_data + data_written,
-                                      vsize * units.Gi,
-                                      self.chunk_size)))
-                    # In GiB
-                    vsize += (self.chunk_size / units.Gi)
-                    self.extend_vol(ai_name, vsize)
-                    # Force the SCSI bus to scan for extended volume
-                md5.update(data)
-                os_hash_value.update(data)
-                with self._connect_target(ai_name) as device:
-                    self._execute("chmod o+w {}".format(device))
-                    self.rescan_device(device, vsize * units.Gi)
-                    with io.open(device, 'wb') as outfile:
-                        outfile.seek(data_written)
-                        outfile.write(data)
-                    data_written += len_data
-                    LOG.debug(_("Writing Data. Length: %s" % len(data)))
-                    self._execute("sync")
+            data_written = self.perform_incremental_write(
+                ai_name, chunks, md5, os_hash_value)
         else:
-            with self._connect_target(ai_name) as device:
-                self._execute("chmod o+w {}".format(device))
-                with io.open(device, 'wb') as outfile:
-                    for data in chunks:
-                        # Write image data
-                        data_written += len(data)
-                        md5.update(data)
-                        outfile.write(data)
-                        LOG.debug(
-                            _("Writing Data. Length: %s, Offset: %s" %
-                                (len(data), outfile.tell())))
-            self._execute("chmod o-w {}".format(device))
+            data_written = self.perform_total_write(ai_name, chunks, md5)
         md5hex = md5.hexdigest()
         oshex = os_hash_value.hexdigest()
         # Add data length and checksum to ai metadata
