@@ -552,8 +552,8 @@ class DateraDriver(object):
         new_size = 0
         try:
             device = os.readlink(device)
-        except OSError:
-            LOG.debug("Readlink failed for {}".format(device))
+        except OSError as e:
+            LOG.debug("Readlink failed for {}, {}".format(device, e))
         d = device.split("/")[-1].strip()
         rescan = "/sys/block/{}/device/rescan".format(d)
         start_time = time.time()
