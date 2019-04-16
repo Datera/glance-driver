@@ -550,6 +550,10 @@ class DateraDriver(object):
         # Rescan ISCSI devices
         retry = 0
         new_size = 0
+        try:
+            device = os.readlink(device)
+        except OSError:
+            LOG.debug("Readlink failed for {}".format(device))
         d = device.split("/")[-1].strip()
         rescan = "/sys/block/{}/device/rescan".format(d)
         start_time = time.time()
