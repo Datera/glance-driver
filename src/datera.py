@@ -400,7 +400,7 @@ class Store(glance_store.driver.Store):
 
 class DateraDriver(object):
 
-    VERSION = '2019.3.26.0'
+    VERSION = '2019.4.16.1'
     VERSION_HISTORY = """
         1.0.0 -- Initial driver
         1.0.1 -- Removing references to trace_id from driver
@@ -425,6 +425,8 @@ class DateraDriver(object):
         2019.3.25.0 -- Bugfix for missing parentheses to string format
                        arguments
         2019.3.26.0 -- Added a poller to rescan_device
+        2019.4.16.0 -- Bugfixes for DAT-20105
+        2019.4.16.1 -- Increment version string
     """
     HEADER_DATA = {'Datera-Driver': 'OpenStack-Glance-{}'.format(VERSION)}
 
